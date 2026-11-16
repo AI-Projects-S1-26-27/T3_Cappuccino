@@ -1,0 +1,276 @@
+OPEN TASKS - Federated RUL Prediction under Non-IID Data (C-MAPSS FD004)
+==========================================================================
+Snapshot: 2026-11-16, repo state at commit 38dcb80 (main)
+
+Read first (everyone):
+  - docs/DECISIONS.md  -> every rule we already agreed on. Task IDs below cite it (D*, M*, PT*, F*, LA*, E*).
+                          Decisions are FROZEN: if you need to change one, add a new entry in DECISIONS.md
+                          saying what changed and why, BEFORE any registered run uses it.
+  - configs/base.yaml  -> all numbers live here. Never hard-code a number in code.
+  - Ground rules: Python 3.12, install from requirements.lock (CPU torch). Add a package to requirements.txt
+    only if code needs it, with a one-line reason comment (P2). Tests run on the committed real-data slice in
+    tests/data/ (P3). Every registered run uses CPU, seeded, 3 threads (M5).
+  - Workflow: one branch per task, PR into main, CI must pass (pytest).
+
+
+WHAT ALREADY EXISTS (done)
+--------------------------
+  src/rulfl/data/pipeline.py   build_dataset(cfg) -> Dataset            (D1-D8)
+  src/rulfl/model/gru.py       RULModel, predict_rul                    (M1, M4)
+  src/rulfl/model/train.py     train_centralized(cfg, ds, seed)         (M3, M5)
+  src/rulfl/fl/client.py       client_seed, client_update               (F2, F4)
+  src/rulfl/fl/fedla.py        label_histogram, fedla_weights           (LA1-LA10)
+  src/rulfl/fl/simulate.py     run_federated(cfg, ds, manifest, algo, seed)  reference simulator,
+                               algos "fedavg" | "fedprox" | "fedla"     (F1-F8, F10, LA4-LA6)
+  src/rulfl/flower_app/        Flower wiring, step A only (toy client)  (F9, F10)
+
+NOT YET BUILT
+  src/rulfl/partition/__init__.py   EMPTY
+  src/rulfl/eval/__init__.py        EMPTY
+  No experiment runner, no scripts, no manifests/, no results, no figures, no report.
+  base.yaml still lacks the values that tuning/pilot must set: `model:` (hidden, layers, lr, dropout),
+  fl.E, fl.R, fl.lr, fl.mu.
+
+
+DEPENDENCY ORDER (critical path)
+--------------------------------
+  T1 Partition ─┬──────────────> T5 Flower step B + Gate 2
+                ├──> T6 Pilot + mu selection ──> T8 MAIN GRID ──> T9 Head-refit ──> T10 Analysis ──> T11 Report
+  T4 Tuning ────┤                                  ^
+  T3 Runner ────┴──> T7 Baselines ─────────────────┘
+  T2 Eval metrics ──> T3, T10
+  Can start TODAY with no dependency: T1, T2, T3, T4, T11 (method sections), T5 (with a hand-made manifest).
+
+
+==========================================================================
+T1. PARTITIONER + MANIFESTS                       [critical path, start now]
+==========================================================================
+Goal: split the 199 training engines (and the 50 validation engines) across K = 5 clients with a
+controllable amount of label skew H, and freeze every split to a file.
+
+Where: src/rulfl/partition/__init__.py (+ a script to write manifests), tests/test_partition.py
+
+Build:
+  1. assign_clients(lifetimes: dict[int,int], K: int, H: float, seed: int) -> dict[int,int]
+       - Sort engines by (lifetime, engine id) (PT2), cut into K contiguous blocks as equal as possible
+         (199 -> 40,40,40,40,39).
+       - Engine in block b goes to client b with probability H, otherwise to a uniformly random client
+         (P(client k) = H*1[b=k] + (1-H)/K). Randomness from np.random.default_rng(seed) (PT3).
+       - If any client ends with < cfg.partition.min_engines_per_client (10) engines -> raise. NO redraws (PT4).
+  2. skew(labels_by_client: list[np.ndarray], all_labels: np.ndarray) -> float
+       - Mean over clients of Wasserstein-1 distance (in cycles) between that client's training RUL labels
+         and all training labels (PT6). numpy only (no scipy) - W1 between two 1-D empirical
+         distributions = integral of |CDF_a - CDF_b|.
+  3. Validation routing (PT5): route the 50 validation engines with the SAME rule, H and seed, using their
+     own lifetime blocks (ds.val_engine_lifetimes).
+  4. Manifest writer (PT7): for every H in partition.H_grid x every seed in seeds.main + seeds.selection +
+     seeds.pilot, write manifests/H{H:.2f}_s{seed}.json with
+       {"train": {engine: client}, "val": {engine: client}, "sha256": "...", "H":..., "seed":..., "skew":...}
+     The keys "train"/"val" are REQUIRED - run_federated already reads that format (DECISIONS line ~132).
+     Commit the manifests. Never hand-edit them. Store the hash so runs can record which manifest they used.
+Tests (required):
+  - H = 1 -> every engine lands in its own block's client.
+  - Same (lifetimes, K, H, seed) -> identical result; different seed -> different result (for H < 1).
+  - Seed-averaged skew strictly increases over H in {0, .25, .5, .75, 1} (PT6).
+  - < 10 engines on a client raises.
+  - Block sizes 40,40,40,40,39 for 199 engines.
+  - Manifest loads into run_federated without error (small smoke run on the test slice).
+Done when: manifests/ committed, tests green, skew-vs-H table pasted into the PR description.
+
+
+==========================================================================
+T2. EVALUATION METRICS + STATISTICS               [start now, no dependency]
+==========================================================================
+Goal: every number in the report comes from these functions.
+
+Where: src/rulfl/eval/__init__.py (split into metrics.py / stats.py if it grows), tests/test_eval.py
+
+Build:
+  1. nasa_score(pred, true) -> float  (E1): d = pred - true; cost = exp(d/10)-1 if d >= 0 (late),
+     exp(-d/13)-1 if d < 0 (early); summed over engines.
+  2. metrics(pred, true) -> {"mae", "rmse", "nasa"}  (E1). Inputs are already clamped predictions (M4) and
+     capped labels (D8).
+  3. life_stage_mae(pred, true, edges=(50,125)) -> {"near": .., "mid": .., "healthy": ..}  (E4).
+     On real FD004 test labels the counts must be 79 / 102 / 67 - assert this in a test.
+  4. worst_client_mae(client_val_mae_at_best_round) -> max, ignoring nan (E2).
+  5. rounds_to_threshold(val_mae_per_round, centralized_best_maes, threshold=1.10) -> int | None  (E3)
+     None = "not reached" (censored). Never drop such runs.
+  6. Paired stats (E7), numpy only:
+       - paired_diff_bootstrap_ci(a, b, n_boot, seed) -> (mean_diff, lo, hi), 95%
+       - wilcoxon_signed_rank_exact_one_sided(diffs) -> p   (exact by enumerating all 2^n sign flips;
+         with n = 5 the smallest p must be 1/32 = 0.03125 - test this; pooled H >= 0.5 uses n = 15)
+Tests: hand-computed examples for every function; NASA score asymmetric (late costs more than early);
+       Wilcoxon p matches scipy.stats.wilcoxon on a few vectors (scipy may be used in the TEST only if it is
+       already installed; otherwise hard-code expected values).
+Done when: all functions + tests merged.
+
+
+==========================================================================
+T3. EXPERIMENT RUNNER + RUN ARTIFACTS             [start now; uses T1/T2 when ready]
+==========================================================================
+Goal: one command runs one registered experiment and saves everything needed to regenerate any number
+later (E8). All later tasks (T4, T6, T7, T8, T9) run through this.
+
+Where: src/rulfl/run.py (or scripts/run.py), tests/test_run.py
+
+Build:
+  1. CLI, e.g.  python -m rulfl.run --kind {centralized,local,federated} --algo {fedavg,fedprox,fedla}
+                 --H 0.5 --seed 1 [--engine sim|flower] [--set fl.mu=0.01 ...]
+  2. Sets torch threads = 3 and torch.use_deterministic_algorithms(True) (M5) before anything else.
+  3. Output folder runs/<kind>_<algo>_H<H>_s<seed>/ containing:
+       config.yaml (the fully resolved config), manifest sha256, per-round log (CSV/JSON: val_mae,
+       client_val_mae, bytes), final metrics (test mae/rmse/nasa, worst-client MAE, rounds-to-110%,
+       life-stage MAE), best checkpoint (.pt), test predictions (.npy or .csv: engine, pred, true, true_uncapped),
+       git commit hash, wall-clock time.
+  4. Skip a run whose folder already has a "DONE" marker (so the grid can be resumed after a crash).
+  5. A batch script that launches a list of runs in parallel processes (laptop: ~3-4 processes x 3 threads).
+  6. runs/ goes in .gitignore except a small results index (one CSV row per finished run) that IS committed.
+Tests: a tiny federated run (2 rounds, test slice) produces every file above; rerunning it is skipped.
+
+
+==========================================================================
+T4. MODEL TUNING (centralized)                    [start now]
+==========================================================================
+Goal: pick the GRU size and learning rate ONCE, then freeze them for every arm (M2).
+
+Steps:
+  1. Download the real FD004 files into data/raw/ and verify against data/raw/CHECKSUMS.txt (P4).
+  2. Grid: hidden {32,64,128} x layers {1,2} x lr {0.001,0.003} = 12 configs, seed 1, train_centralized,
+     score = best validation MAE. Dropout 0.2 only when layers = 2.
+  3. Top 2 configs rerun with seeds 1,2,3; lower mean validation MAE wins.
+  4. Write the winner into configs/base.yaml as a new `model:` section (hidden, layers, lr, dropout) and add
+     the result table + a short note to DECISIONS.md (M2 result). Validation MAE only - NEVER look at test.
+  5. Re-measure seconds/epoch for the winner on CPU with 3 threads; if a federated run would be unreasonably
+     slow, raise it with the group now (M5: then ALL runs move to GPU together, never mixed).
+Estimated compute: ~12 short runs + 6 confirm runs, a few hours on a laptop.
+Done when: base.yaml has `model:` and the table is in DECISIONS.md.
+
+
+==========================================================================
+T5. FLOWER APP STEP B + GATE 2  (Harsha)          [needs a manifest; real ones from T1]
+==========================================================================
+Goal: the real federated training running inside Flower must reproduce the plain simulator EXACTLY.
+
+Where: src/rulfl/flower_app/ (new module, e.g. rul.py), tests/test_flower_app.py
+
+Build:
+  1. Real train_fn(arrays, client_id, config) -> (new_arrays, n_windows): load arrays into RULModel, pick this
+     client's training windows from the manifest, call client_update(model, global, X, y, cfg, mu,
+     seed=client_seed(run_seed, server_round, client_id), sample_weight=...). Arms:
+       fedavg  mu = 0;  fedprox  mu = cfg.fl.mu;  fedla  mu = 0 + fedla_weights (computed once, LA4).
+     Client is stateless (F2, F9): no context.state. FedLA weights must therefore be recomputed
+     deterministically each round, or the global histogram sent in the round config.
+  2. Real evaluate_fn: global val MAE on all 50 val engines + per-client MAE on routed val engines,
+     every round including round 0 (F10). Bytes per round as in simulate.py (F8 + LA6 on round 1).
+  3. run_federated_flower(cfg, ds, manifest, algo, seed) returning the SAME dict as run_federated
+     (val_mae, client_val_mae, bytes, best_round, best_state). Plug into the T3 runner as --engine flower.
+  4. GATE 2 test: for fedavg, fedprox and fedla, a short run on the test slice gives identical per-round
+     val MAE (to ~1e-6), identical best_round and identical final weights in Flower vs run_federated.
+Done when: Gate 2 test green in CI.
+
+
+==========================================================================
+T6. FL PILOT (F7) + FEDPROX MU SELECTION (F5)     [needs T1, T3, T4]
+==========================================================================
+Goal: freeze the federated settings E, R, lr, mu BEFORE any result that matters. Validation only.
+
+Steps:
+  1. Pilot: E in {1,3} x lr in {tuned lr, tuned lr/3}, R = 60, H in {0, 1}, seeds 101-102, FedAvg.
+     Pick the (E, lr) where FedAvg learns best at H = 0. Write fl.E, fl.lr, fl.R into base.yaml.
+  2. Check: does FedAvg degrade at H = 1 vs H = 0? If NOT -> switch to K = 10 (proposal fallback) for the
+     whole study, re-run T1's manifest writer with K = 10, note it in DECISIONS.md (and revisit LA2).
+  3. mu selection: FedProx with mu in {0.001, 0.01, 0.1, 1} at H = 1, seeds 101-103; lowest mean val MAE
+     wins -> fl.mu in base.yaml.
+  4. Record all pilot/selection tables in DECISIONS.md.
+Compute: pilot 16 runs + mu 12 runs.
+
+
+==========================================================================
+T7. BASELINES (E5)                                [needs T3, T4; local-only also needs T1]
+==========================================================================
+  1. Centralized: all training engines, seeds 1-5 (train_centralized). Its mean best val MAE is the
+     reference for rounds-to-110% (E3), so this must finish before the main-grid analysis.
+  2. Local-only: each client trains alone on its own engines (centralized trainer on a subset), at H = 0 and
+     H = 1, seeds 1-5 -> 2 x 5 x 5 = 50 small runs. Score each on the test set and on its routed val engines.
+All saved through the T3 runner.
+
+
+==========================================================================
+T8. MAIN EXPERIMENT GRID                          [needs T1-T4, T6; Gate 2 should pass first]
+==========================================================================
+  - 5 H values x 5 seeds (1-5) x 3 arms (fedavg, fedprox, fedla) = 75 federated runs, R rounds each.
+  - Same (H, seed) manifest for all three arms (PT3) - that is what makes comparisons paired.
+  - BEFORE launching: write the hypotheses down in DECISIONS.md (E7) and commit, so they are dated
+    before any result exists.
+  - Split the grid across members' machines by seed; all on CPU, 3 threads, same requirements.lock.
+  - After it finishes: check every run has DONE + all artifacts; no reruns of single "bad" seeds.
+Compute: at ~7-42 min per run (M5 estimate) -> roughly 9-50 CPU-hours total; plan accordingly.
+
+
+==========================================================================
+T9. HEAD-REFIT PROBE (E6, diagnostic)             [code now; run after T8]
+==========================================================================
+  For each main-grid run's best-round model: freeze model.gru, re-initialise model.head, train only the
+  head on ALL training windows with M3 settings (early stop on validation), score on test.
+  Interpretation: test MAE back near centralized -> damage was in the head; otherwise in the features.
+  Label it clearly as a diagnostic in results and report.
+
+
+==========================================================================
+T10. ANALYSIS + FIGURES                           [code now on fake run folders; final after T8/T9]
+==========================================================================
+  Everything generated by a script from runs/ (E8) - no numbers typed by hand.
+  Tables:
+    - Test MAE / RMSE / NASA per arm per H (mean +- over seeds), plus centralized and local-only.
+    - Paired difference vs FedAvg per H with 95% bootstrap CI; one-sided exact Wilcoxon per H and pooled
+      over H >= 0.5 (15 pairs) (E7).
+    - Worst-client MAE per arm per H (E2). Rounds-to-110% with censored runs shown (E3).
+    - Communication: bytes to reach threshold / total (F8, FedLA extra histograms LA6).
+    - Life-stage MAE (near / mid / healthy) per arm per H (E4). Head-refit results (E6).
+  Figures:
+    - Test MAE vs H (one line per arm, CI bands, centralized as a horizontal line).
+    - Validation-MAE convergence curves per round, H = 0 vs H = 1.
+    - Skew (Wasserstein) vs H, from the manifests.
+    - Per-client label histograms at H = 0 vs H = 1 (shows the capped-bin skew described in DECISIONS FedLA).
+    - Worst-client MAE vs H.
+  Output to reports/figures/ and reports/tables/.
+
+
+==========================================================================
+T11. REPORT + README                              [method sections can start now]
+==========================================================================
+  - README: research question currently says FedAvg vs FedProx only - add FedLA as the third arm, add
+    "how to install / run tests / run an experiment" once T3 exists.
+  - Report sections: problem + dataset, pipeline (D1-D8), model + tuning (M1-M5), partitioning + skew
+    (PT1-PT7), FL algorithms (F1-F10, LA1-LA10), evaluation protocol (E1-E8), results, discussion.
+  - Limitations that MUST be stated: per-condition normalisation uses pooled raw stats (D3) which a real
+    federation could not do; FedLA histograms reveal each client's label distribution, no privacy
+    guarantee claimed (LA7, LA10); per-H Wilcoxon with 5 pairs is weak (E7); simulation on one machine.
+  - Methods/limitations can be drafted now from DECISIONS.md; results sections wait for T10.
+
+
+==========================================================================
+OPTIONAL / STRETCH (only after T8)
+==========================================================================
+  S1. Generalisation: repeat a reduced grid on FD001-FD003 (README goal). FD001 has 1 condition - the
+      pipeline already handles it (test slice includes FD001).
+  S2. K = 10 sensitivity run, if K = 5 was kept.
+  S3. Reproducibility check: a second member reruns 2-3 random registered runs and gets identical logs.
+
+
+==========================================================================
+SUGGESTED SPLIT (5 people) - adjust as you like
+==========================================================================
+  Harsha      : T5 (Flower step B + Gate 2), then help run T8.
+  Fidel       : T3 (runner + artifacts) - knows the simulator/trainer best; then T6 pilot + mu selection.
+  Member A    : T1 (partitioner + manifests) - critical path, do first; then T7 local-only baselines.
+  Member B    : T2 (metrics + stats), then T10 (analysis + figures) - same person keeps it consistent.
+  Member C    : T4 (tuning, needs a machine free for a few hours), then T7 centralized, then T9 head-refit.
+  Member D    : T11 (README + report drafting from DECISIONS.md), then joins T10 and the write-up of results.
+  Everyone    : T8 main grid - split seeds across machines.
+
+Milestones:
+  M1  T1 + T2 + T4 merged                 -> config frozen except FL settings
+  M2  T3 + T5 (Gate 2) merged, T6 done    -> all settings frozen; hypotheses committed
+  M3  T7 + T8 finished                    -> no more training
+  M4  T9 + T10 + T11                      -> report

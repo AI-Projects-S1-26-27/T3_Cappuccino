@@ -19,6 +19,7 @@ train:                   # centralized training (DECISIONS M3, M5)
   max_epochs: 100
   patience: 10           # early stop after this many epochs without val-MAE improvement
   device: cpu
+  threads: 3             # CPU threads for every registered run; thread count changes results (M5)
 tuning:                  # run once on validation, then the winner is frozen as `model:` (M2)
   hidden: [32, 64, 128]
   layers: [1, 2]
