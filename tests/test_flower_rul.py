@@ -52,6 +52,35 @@ def test_arrays_to_state_rejects_the_wrong_count(cfg, slice_ds):
         arrays_to_state([np.zeros(1)], keys)
 
 
+def test_arrays_are_independent_of_model_and_transport(cfg, slice_ds):
+    """F12: Flower payloads must not alias trainable tensors or incoming buffers."""
+    keys = state_keys(cfg, slice_ds.X_train.shape[2])
+    state = new_model(cfg, slice_ds.X_train.shape[2]).state_dict()
+    payload = state_to_arrays(state, keys)
+    original = state[keys[0]].clone()
+    payload[0].flat[0] += 1
+    assert torch.equal(state[keys[0]], original)
+
+    restored = arrays_to_state(payload, keys)
+    before = restored[keys[0]].clone()
+    payload[0].flat[0] += 1
+    assert torch.equal(restored[keys[0]], before)
+
+
+def test_invalid_weight_payload_is_rejected(cfg, slice_ds):
+    """A corrupted dtype or NaN should fail before any training starts."""
+    keys = state_keys(cfg, slice_ds.X_train.shape[2])
+    good = state_to_arrays(new_model(cfg, slice_ds.X_train.shape[2]).state_dict(), keys)
+    bad_dtype = [a.copy() for a in good]
+    bad_dtype[0] = bad_dtype[0].astype(np.float64)
+    with pytest.raises(ValueError, match="float32"):
+        arrays_to_state(bad_dtype, keys)
+    bad_nan = [a.copy() for a in good]
+    bad_nan[0].flat[0] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        arrays_to_state(bad_nan, keys)
+
+
 # ---------- per-worker setup ----------
 
 def test_threads_come_from_the_config(cfg):

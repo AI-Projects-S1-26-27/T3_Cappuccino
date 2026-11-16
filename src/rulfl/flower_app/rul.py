@@ -62,13 +62,22 @@ def state_keys(cfg: dict, n_features: int) -> list[str]:
 
 
 def state_to_arrays(state: dict, keys: list[str]) -> list[np.ndarray]:
-    return [state[k].detach().cpu().numpy() for k in keys]
+    # Keep the transport payload independent of the model tensors. Flower may
+    # retain or modify arrays after the client returns.
+    return [state[k].detach().cpu().numpy().copy() for k in keys]
 
 
 def arrays_to_state(arrays: list[np.ndarray], keys: list[str]) -> dict:
     if len(arrays) != len(keys):
         raise ValueError(f"expected {len(keys)} arrays, got {len(arrays)}")
-    return {k: torch.from_numpy(np.asarray(a)) for k, a in zip(keys, arrays)}
+    state = {}
+    for key, array in zip(keys, arrays):
+        arr = np.asarray(array)
+        if arr.dtype != np.float32 or not np.all(np.isfinite(arr)):
+            raise ValueError(f"invalid Flower array {key}: expected finite float32 weights")
+        # Copy out of the transport buffer: training must never mutate incoming weights.
+        state[key] = torch.from_numpy(arr.copy())
+    return state
 
 
 # ---------- FedLA ----------
