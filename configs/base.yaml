@@ -26,7 +26,7 @@ tuning:                  # run once on validation, then the winner is frozen as 
   lr: [0.001, 0.003]
   dropout_if_2_layers: 0.2
   seeds_first_pass: [1]
-  seeds_confirm: [1, 2, 3]
+  seeds_confirm: [101, 102, 103]      # M6: never the reported seeds 1-5
   top_k_confirm: 2
 fl:
   K: 5                   # number of simulated clients

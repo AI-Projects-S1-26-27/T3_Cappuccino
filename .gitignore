@@ -221,3 +221,6 @@ __marimo__/
 data/raw/*
 !data/raw/CHECKSUMS.txt
 data/processed/
+
+# Run folders (DECISIONS E15): checkpoints and logs stay local; results/index.csv is rebuilt from them and committed
+runs/

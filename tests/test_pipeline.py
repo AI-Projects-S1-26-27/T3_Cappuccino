@@ -190,3 +190,10 @@ def test_end_to_end_is_deterministic(slice_cfg):
 def slice_dir_path(cfg):
     from pathlib import Path
     return Path(cfg["data"]["raw_dir"])
+
+
+def test_test_engine_ids_are_kept_in_row_order(slice_ds):
+    """E15: test_predictions.csv names each row by its real engine id. Row i of X_test is engine engine_test[i]."""
+    e = slice_ds.engine_test
+    assert len(e) == len(slice_ds.X_test) == len(slice_ds.y_test)
+    assert (e[1:] > e[:-1]).all()                                     # sorted, one row per engine

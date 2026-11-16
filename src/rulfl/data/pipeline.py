@@ -150,6 +150,7 @@ class Dataset:
     X_test: np.ndarray             # (n_test_engines, 30, f): last window per test engine
     y_test: np.ndarray             # true RUL, capped at rul_cap (headline, D8)
     y_test_uncapped: np.ndarray    # true RUL as NASA gives it
+    engine_test: np.ndarray        # (n_test_engines,) engine id of each test row, sorted (E15)
     feature_names: list[str]
     train_engine_lifetimes: dict[int, int]   # engine id -> total flights (for the partitioner)
     val_engine_lifetimes: dict[int, int]     # same for validation engines (routing, PT5)
@@ -188,7 +189,7 @@ def build_dataset(cfg: dict) -> Dataset:
     return Dataset(
         X_train=X_train, y_train=y_train, engine_train=e_train,
         X_val=X_val, y_val=y_val, engine_val=e_val,
-        X_test=X_test, y_test=y_test, y_test_uncapped=y_test_uncapped,
+        X_test=X_test, y_test=y_test, y_test_uncapped=y_test_uncapped, engine_test=e_test,
         feature_names=scaler.feature_names,
         train_engine_lifetimes={int(e): int(T) for e, T in tr.groupby("engine")["cycle"].max().items()},
         val_engine_lifetimes={int(e): int(T) for e, T in va.groupby("engine")["cycle"].max().items()},
