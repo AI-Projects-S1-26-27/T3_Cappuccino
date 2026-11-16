@@ -55,6 +55,7 @@ As built (real FD004): 43,064 train windows (199 engines), 10,964 validation win
 | M3 | Loss = MSE on y/125 (model outputs RUL/125). Adam, batch 256, gradient-norm clip 1.0. Centralized: max 100 epochs, early stop after 10 epochs without validation-MAE improvement, keep best epoch | Targets in 0–1 train more smoothly; clipping guards against GRU gradient spikes; early stopping prevents overfitting |
 | M4 | Evaluation (validation and test, every arm) uses one function: prediction = clamp(model(x) × 125, 0, 125). Training loss is unclamped | RUL cannot be negative and labels never exceed 125. Clamping during training would block gradients; a sigmoid output would saturate on the many labels at the cap |
 | M5 | All registered runs on CPU, seeded (init, batch order) with `torch.use_deterministic_algorithms(True)`. Revisit after tuning: if the frozen model is too slow on CPU, ALL registered runs move to GPU together, never mixed | Measured on a 12-thread laptop CPU (random data, real shapes, 40k windows): 1.7 s/epoch (32×1) to 10.8 s/epoch (128×2), i.e. ~7–42 min per federated run. Mixing devices would add numerical noise to paired comparisons, and the expected FedAvg/FedProx differences are small. One CPU lock file for everyone. [added when built] CPU thread count also changes results (~7th digit; measured 1 vs 3 vs 12 threads), so every registered run uses the same count: 3 (from the parallel-throughput benchmark), set by the runner |
+| M6 | [changes M2's confirmation seeds] The top 2 tuning configs are rerun on seeds 101–103 (`seeds.selection`), not 1–3. Seed 1 is still used for the 12-config screen | Seeds 1–5 are the reported seeds; choosing the model on them would bias the centralized validation MAE that sets E3's 110% threshold. Same rule as F5 for μ: no choice is ever made on a reported seed |
 
 Frozen signatures:
 
@@ -124,7 +125,8 @@ make_all(cfg, ds, out_dir, K=None) -> list[dict]                                
 Frozen signatures:
 
 ```python
-client_update(model, global_weights, X, y, cfg, mu: float, sample_weight=None) -> tuple[dict, int]  # new weights, n_examples
+client_seed(run_seed: int, rnd: int, client: int) -> int                               # see the change note below
+client_update(model, global_weights, X, y, cfg, mu: float, seed: int, sample_weight=None) -> tuple[dict, int]  # new weights, n_examples
 run_federated(cfg, ds, manifest, algo: str, seed: int) -> dict   # per round: global val MAE, per-client val MAE, bytes
 ```
 
@@ -214,6 +216,7 @@ fedla_weights(y: np.ndarray, local_counts, global_counts, edges, cap, clip) -> n
 | E12 | Non-finite values (NaN or ±inf) in `pred` or `true` raise `ValueError` | Surfaces a diverged model instead of letting it enter evaluation |
 | E13 | Limitation (for the report): the NASA score is a sum, so one very late prediction can dominate it | Read alongside MAE, never on its own |
 | E14 | `rounds_to_threshold(val_curve, threshold_value) -> (round, reached)` reads `val_curve` as `run_federated` returns `val_mae`: index = round, index 0 = untrained round 0 (F10). First round with value ≤ threshold; None/NaN entries skipped; never reached gives `(None, False)` (censored, E3). Threshold must be finite and > 0; the caller computes it (1.10 × mean best centralized validation MAE) | One indexing convention with the simulator; a 1-based count would report every run one round late |
+| E15 | Run folder layout (details E8). Folder = `runs/<group>/<name>/`; groups `tune`, `central`, `pilot`, `musel`, `main`, `local`, `probe`. The name holds every setting that varies inside its group: `tune/h64_l2_lr0.003_s1`, `central/FD004_s1`, `pilot/fedavg_H1.00_s101_E3_lr0.001`, `musel/fedprox_H1.00_s101_mu0.01`, `main/fedla_H0.50_s3`, `local/H1.00_s2_c4`. Fixed files: `config.yaml` (resolved config), `rounds.jsonl` (federated: one line per round 0..R with `val_mae`, `client_val_mae`, `bytes`) or `epochs.json` (centralized/local: `train_centralized` history), `final.json`, `best.pt`, `test_predictions.csv` (`engine`, `pred`, `true`, `true_uncapped`; real engine ids), `DONE` (written last). `final.json`: `test` (mae, rmse, nasa), `life_stage_mae`, `best_val_mae`, `best_round`, `worst_client_mae`, `round_to_threshold`, `threshold_reached`, `total_bytes`, `manifest_sha256` (the manifest's embedded hash, PT11), `git_commit`, `data_hash`, `seconds`. A folder with `DONE` and the same `config.yaml` is skipped; one with a different `config.yaml` is refused, never skipped or overwritten. `results/index.csv` (one row per run, committed) is rebuilt from every `final.json` by one command, never appended to while runs are going | The task list's `<kind>_<algo>_H<H>_s<seed>` gives the 4 μ-selection runs (and the pilot's E/lr variants) one shared folder, so the DONE skip would silently drop all but the first. The config check catches any naming slip. Rebuilding the index keeps the git tree clean during a grid (the runner refuses a dirty tree) and lets parallel runs never write the same file |
 
 Frozen signatures:
 
