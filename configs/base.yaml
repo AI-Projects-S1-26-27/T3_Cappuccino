@@ -38,6 +38,7 @@ fl:
   E: 1                   # FROZEN by the pilot (F7, F14)
   R: 60                  # F7
   lr: 0.001              # FROZEN by the pilot (F7, F14): the tuned centralized lr
+  mu: 0.001              # FROZEN by mu selection (F5, F15); FedProx only
   batch: 256             # F2
   clip: 1.0              # F2
   mu_grid: [0.001, 0.01, 0.1, 1.0]    # F5, selected at H = 1 on validation
