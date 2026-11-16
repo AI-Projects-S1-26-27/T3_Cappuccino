@@ -28,16 +28,17 @@ def train_centralized(cfg: dict, ds: Dataset, seed: int) -> tuple[RULModel, dict
     torch.manual_seed(seed)                         # same seed -> same starting weights
     rng = np.random.default_rng(seed)               # same seed -> same batch order every epoch
 
-    model = RULModel(ds.X_train.shape[2], m["hidden"], m["layers"], m["dropout"])
+    dev = torch.device(t.get("device", "cpu"))      # M8: registered runs on the GPU
+    model = RULModel(ds.X_train.shape[2], m["hidden"], m["layers"], m["dropout"]).to(dev)   # built on CPU, then moved
     opt = torch.optim.Adam(model.parameters(), lr=m["lr"])
-    X = torch.from_numpy(ds.X_train)
-    y = torch.from_numpy(ds.y_train) / cap          # train on RUL / 125 (M3)
+    X = torch.from_numpy(ds.X_train).to(dev)
+    y = (torch.from_numpy(ds.y_train) / cap).to(dev)    # train on RUL / 125 (M3)
 
     hist = {"train_loss": [], "val_mae": [], "best_epoch": 0}
     best_mae, best_state = float("inf"), None
     for epoch in range(t["max_epochs"]):
         model.train()
-        order = torch.from_numpy(rng.permutation(len(X)))
+        order = torch.from_numpy(rng.permutation(len(X))).to(dev)
         total = 0.0
         for i in range(0, len(X), t["batch"]):
             idx = order[i:i + t["batch"]]

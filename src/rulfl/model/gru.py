@@ -42,10 +42,11 @@ def predict_rul(model: nn.Module, X: np.ndarray, cap: int, batch: int = 1024) ->
     Runs in eval mode without gradients, in batches to keep memory small; restores the model's mode."""
     was_training = model.training
     model.eval()
+    dev = next(model.parameters(), torch.empty(0)).device   # follow the model: CPU or GPU (M8); no weights -> CPU
     preds = []
     with torch.no_grad():
         for i in range(0, len(X), batch):
-            out = model(torch.from_numpy(X[i:i + batch]))
-            preds.append((out * cap).clamp(0, cap).numpy())
+            out = model(torch.from_numpy(X[i:i + batch]).to(dev))
+            preds.append((out * cap).clamp(0, cap).cpu().numpy())
     model.train(was_training)
     return np.concatenate(preds)

@@ -27,7 +27,8 @@ def client_update(model: RULModel, global_weights: dict, X: np.ndarray, y: np.nd
     Returns (new weights as independent copies, number of training windows). `global_weights` is never changed.
     Fresh Adam every call: no optimiser state is carried between rounds (F2)."""
     f, cap = cfg["fl"], cfg["data"]["rul_cap"]
-    g = {k: v.detach().clone() for k, v in global_weights.items()}   # snapshot BEFORE training (F4)
+    dev = next(model.parameters()).device                             # follow the model: CPU or GPU (M8)
+    g = {k: v.detach().to(dev).clone() for k, v in global_weights.items()}   # snapshot BEFORE training (F4)
     model.load_state_dict(g)                                          # start from the global model
     model.train()
     torch.use_deterministic_algorithms(True)                          # M5; Flower workers are fresh processes
@@ -35,10 +36,10 @@ def client_update(model: RULModel, global_weights: dict, X: np.ndarray, y: np.nd
     rng = np.random.default_rng(seed)                                 # batch order
     opt = torch.optim.Adam(model.parameters(), lr=f["lr"])
 
-    X_t, y_t = torch.from_numpy(X), torch.from_numpy(y) / cap        # train on RUL / 125 (M3)
-    w_t = None if sample_weight is None else torch.from_numpy(sample_weight).float()   # float32 like FedAvg's loss
+    X_t, y_t = torch.from_numpy(X).to(dev), (torch.from_numpy(y) / cap).to(dev)   # train on RUL / 125 (M3)
+    w_t = None if sample_weight is None else torch.from_numpy(sample_weight).float().to(dev)   # float32 like FedAvg's loss
     for _ in range(f["E"]):
-        order = torch.from_numpy(rng.permutation(len(X)))
+        order = torch.from_numpy(rng.permutation(len(X))).to(dev)
         for i in range(0, len(X), f["batch"]):
             idx = order[i:i + f["batch"]]
             err2 = (model(X_t[idx]) - y_t[idx]) ** 2                  # squared error per window

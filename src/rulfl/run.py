@@ -126,7 +126,7 @@ def _clean(x):
 def save_model_outputs(folder: Path, model: RULModel, ds: Dataset, cfg: dict) -> dict:
     """Shared by every run kind: best.pt, test_predictions.csv, and the test scores (E1, E4)."""
     cap = cfg["data"]["rul_cap"]
-    torch.save(model.state_dict(), folder / "best.pt")
+    torch.save({k: v.cpu() for k, v in model.state_dict().items()}, folder / "best.pt")   # loads on any machine
     pred = predict_rul(model, ds.X_test, cap)
     with open(folder / "test_predictions.csv", "w", newline="", encoding="utf8") as f:
         w = csv.writer(f)
@@ -319,6 +319,8 @@ def main(argv=None) -> Path:
             out = centralized_run(folder, cfg, ds, args.seed)
         out.update(group=group, name=name, seed=args.seed, algo=args.algo, H=args.H, client=args.client,
                    git_commit=commit, git_dirty=dirty, data_hash=data_hash(cfg),
+                   device=cfg["train"].get("device", "cpu"), torch_version=torch.__version__,
+                   gpu=torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
                    seconds=time.perf_counter() - start)
         (folder / "final.json").write_text(json.dumps(_clean(out), indent=1, allow_nan=False), encoding="utf8")
 

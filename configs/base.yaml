@@ -18,7 +18,7 @@ train:                   # centralized training (DECISIONS M3, M5)
   clip: 1.0              # gradient-norm clipping
   max_epochs: 100
   patience: 10           # early stop after this many epochs without val-MAE improvement
-  device: cpu
+  device: cuda           # M8: every registered run on the GPU (same RTX 3050 on both run machines); tests use cpu
   threads: 3             # CPU threads for every registered run; thread count changes results (M5)
 model:                   # FROZEN by tuning (M2, M6, M7). Never changed again, never retuned on federated results
   hidden: 128

@@ -23,6 +23,7 @@ def slice_cfg() -> dict:
         cfg = yaml.safe_load(f)
     cfg = copy.deepcopy(cfg)
     cfg["data"]["raw_dir"] = str(SLICE_DIR)
+    cfg["train"]["device"] = "cpu"           # tests run on CPU everywhere (CI has no GPU); GPU tests opt in
     return cfg
 
 

@@ -52,6 +52,7 @@ def run_federated(cfg: dict, ds: Dataset, manifest: dict, algo: str, seed: int) 
     torch.use_deterministic_algorithms(True)                  # as train_centralized (M5)
     torch.manual_seed(seed)                                   # same start weights as train_centralized(seed)
     model = RULModel(ds.X_train.shape[2], m["hidden"], m["layers"], m["dropout"])
+    model.to(cfg["train"].get("device", "cpu"))               # M8: built on CPU (same start weights), then moved
     global_w = {k: v.detach().clone() for k, v in model.state_dict().items()}
     n_params = sum(v.numel() for v in global_w.values())
 
