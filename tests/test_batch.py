@@ -5,7 +5,7 @@ import json
 import pytest
 import yaml
 
-from rulfl.batch import build_index, plan, run_jobs
+from rulfl.batch import build_index, job_succeeded, plan, run_jobs
 
 
 @pytest.fixture()
@@ -70,3 +70,14 @@ def test_index_has_one_row_per_finished_run(tmp_path):
         rows = list(csv.DictReader(f))
     assert [(r["group"], r["name"]) for r in rows] == [("central", "FD004_s1"), ("main", "fedla_H0.50_s3")]
     assert rows[1]["test_mae"] == "20.0" and rows[1]["best_val_mae"] == "18.0" and rows[0]["algo"] == ""
+
+
+def test_success_is_the_runners_done_line_not_the_exit_code():
+    """M8: on Windows, CUDA's cuDNN crashes while the process exits after a 2-layer GRU with dropout
+    (0xC0000409), AFTER the run folder is complete. The runner prints DONE/SKIPPED only once the folder is final."""
+    assert job_succeeded(0, "loading\nDONE runs/main/fedla_H0.50_s3\n")
+    assert job_succeeded(0xC0000409, "DONE runs/main/fedla_H0.50_s3\n")              # crash at exit, run saved
+    assert job_succeeded(0xC0000409, "SKIPPED (already done) runs/main/x\n")
+    assert not job_succeeded(1, "Traceback (most recent call last): ...\n")          # real failure
+    assert not job_succeeded(0xC0000409, "epoch 3\n")                                # crashed mid-run
+    assert not job_succeeded(0, "")

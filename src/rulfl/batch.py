@@ -46,15 +46,26 @@ def plan(group: str, cfg: dict) -> list[str]:
     raise ValueError(f"no plan for group {group!r}")
 
 
+def job_succeeded(returncode: int, stdout: str) -> bool:
+    """A job succeeded if the runner's last line is DONE or SKIPPED: it prints that only after the run folder is
+    final. Not the exit code: on Windows, cuDNN crashes while the process exits after training a 2-layer GRU with
+    dropout (0xC0000409), after everything is saved (M8). `returncode` is kept for the log only."""
+    lines = [ln for ln in stdout.splitlines() if ln.strip()]
+    return bool(lines) and lines[-1].startswith(("DONE ", "SKIPPED"))
+
+
 def run_jobs(lines: list[str], jobs: int, extra: list[str] = ()) -> list[str]:
     """Run each line as `python -m rulfl.run <line> <extra>`, `jobs` at a time. A failed job doesn't stop the rest
     (its folder is left as .invalid); returns the failed lines so they can be rerun with the same seed."""
-    def one(line: str) -> int:
-        return subprocess.run([sys.executable, "-m", "rulfl.run", *shlex.split(line), *extra]).returncode
+    def one(line: str) -> bool:
+        p = subprocess.run([sys.executable, "-m", "rulfl.run", *shlex.split(line), *extra],
+                           stdout=subprocess.PIPE, text=True)            # stderr (tracebacks) still shows live
+        print(p.stdout, end="", flush=True)
+        return job_succeeded(p.returncode, p.stdout)
 
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        codes = list(pool.map(one, lines))
-    return [line for line, code in zip(lines, codes) if code != 0]
+        ok = list(pool.map(one, lines))
+    return [line for line, good in zip(lines, ok) if not good]
 
 
 COLUMNS = ["group", "name", "seed", "algo", "H", "client", "test_mae", "test_rmse", "test_nasa", "best_val_mae",
