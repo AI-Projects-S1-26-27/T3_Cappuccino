@@ -106,3 +106,33 @@ def test_figures_are_drawn(fake, tmp_path):
     from rulfl.analysis import figures, main_table  # noqa: F401  (import check only)
     out = analyse(fake.parent / "runs", tmp_path / "with_figs", fake.parent / "manifests", with_figures=True)
     assert {"fig_mae_vs_H.png", "fig_life_stage.png", "fig_probe.png", "fig_skew.png"} <= {p.name for p in out.iterdir()}
+
+
+def test_life_stage_split_of_the_skew_penalty(fake):
+    """Fake: every stage MAE rises by 2 from H = 0 to H = 1, so near failure contributes (79 / 248) * 2 = 0.637."""
+    s = (fake / "summary.md").read_text(encoding="utf8")
+    assert "| fedavg | near_failure | 13.30 | 15.30 | +2.00 | +0.637 |" in s
+    assert "| fedavg | healthy | 7.30 | 9.30 | +2.00 | +0.540 |" in s                # 67 / 248 * 2
+    t = rows(fake / "main_table.csv")[0]
+    assert (int(t["n_near_failure"]), int(t["n_mid"]), int(t["n_healthy"])) == (79, 102, 67)
+
+
+def test_probe_change_has_a_paired_interval(fake):
+    pr = next(r for r in rows(fake / "probe.csv") if r["algo"] == "fedla" and float(r["H"]) == 0.5)
+    assert float(pr["change"]) == pytest.approx(-1.0)
+    assert float(pr["change_ci_lo"]) == pytest.approx(-1.0) and float(pr["change_ci_hi"]) == pytest.approx(-1.0)
+    assert int(pr["n"]) == 5
+
+
+def test_client_label_mix_on_the_slice(slice_cfg, slice_ds):
+    from rulfl.analysis import client_label_mix
+    from rulfl.partition.label_skew import assign_clients
+    m = {"H": 1.0, "seed": 1, "K": 5, "train": assign_clients(slice_ds.train_engine_lifetimes, 5, 1.0, 1)}  # slice too small for PT4
+    mix = client_label_mix(slice_ds, m, slice_cfg["fedla"]["bin_edges"], slice_cfg["data"]["rul_cap"])
+    assert [r["client"] for r in mix] == ["all", 0, 1, 2, 3, 4]
+    assert sum(r["engines"] for r in mix[1:]) == mix[0]["engines"] == len(slice_ds.train_engine_lifetimes)
+    assert sum(r["windows"] for r in mix[1:]) == mix[0]["windows"] == len(slice_ds.y_train)
+    for r in mix:
+        assert sum(v for k, v in r.items() if k.startswith("share_")) == pytest.approx(1.0)
+    caps = [r["share_125"] for r in mix[1:]]
+    assert caps == sorted(caps)                    # H = 1: client k holds lifetime block k, longer lives = more capped

@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from rulfl.eval.stats import paired_diff_bootstrap_ci, wilcoxon_signed_rank_exact_one_sided
+from rulfl.fl.fedla import label_histogram
 
 ALGOS = ("fedavg", "fedprox", "fedla")
 STAGES = ("near_failure", "mid", "healthy")
@@ -76,6 +77,7 @@ def main_table(main: dict, Hs, seeds) -> list[dict]:
                 "total_bytes_mean": col(lambda r: r["total_bytes"]).mean(),
                 **{f"mae_{st}_mean": np.nanmean(col(lambda r, st=st: np.nan if r["life_stage_mae"][st] is None
                                                      else r["life_stage_mae"][st])) for st in STAGES},
+                **{f"n_{st}": rs[0]["life_stage_mae"][f"n_{st}"] for st in STAGES},   # same test set in every run
             })
     return rows
 
@@ -142,10 +144,15 @@ def probe_rows(runs_root, main: dict) -> list[dict]:
     rows = []
     for algo in ALGOS:
         for H in sorted({k[1] for k in probe if k[0] == algo}):
-            keys = [k for k in probe if k[0] == algo and k[1] == H and k in main]
+            keys = sorted(k for k in probe if k[0] == algo and k[1] == H and k in main)
+            fed = [main[k]["test"]["mae"] for k in keys]
+            ref = [probe[k]["test"]["mae"] for k in keys]
+            change, lo, hi = paired_diff_bootstrap_ci(ref, fed) if len(keys) > 1 else (ref[0] - fed[0], None, None)
             rows.append({"algo": algo, "H": H, "n": len(keys),
-                         "test_mae_federated": float(np.mean([main[k]["test"]["mae"] for k in keys])),
-                         "test_mae_head_refit": float(np.mean([probe[k]["test"]["mae"] for k in keys]))})
+                         "test_mae_federated": float(np.mean(fed)), "test_mae_head_refit": float(np.mean(ref)),
+                         "change": float(change), "change_ci_lo": lo, "change_ci_hi": hi,
+                         **{f"refit_mae_{st}": float(np.mean([probe[k]["life_stage_mae"][st] for k in keys]))
+                            for st in STAGES}})
     return rows
 
 
@@ -227,7 +234,74 @@ def fmt(x, nd=2):
     return "n/a" if x is None else f"{x:.{nd}f}"
 
 
-def summary_md(table, prim, prem, per_h, base, probe, skew) -> str:
+def client_label_mix(ds, manifest: dict, edges: list[int], cap: int) -> list[dict]:
+    """Each client's share of training windows per FedLA bin (LA1), from the data and one manifest; plus 'all'.
+    Shows what kind of label skew the lifetime partition creates: every engine runs to failure, so it has one window
+    per RUL value below the cap, and only the share of capped windows depends on its lifetime."""
+    names = [f"{a}-{b - 1}" for a, b in zip(edges[:-1], edges[1:])] + [str(cap)]
+    groups = [("all", list(ds.train_engine_lifetimes))]
+    groups += [(k, [int(e) for e, c in manifest["train"].items() if c == k]) for k in range(manifest["K"])]
+    rows = []
+    for client, eng in groups:
+        y = ds.y_train[np.isin(ds.engine_train, eng)]
+        h = label_histogram(y, edges, cap)
+        rows.append({"H": manifest["H"], "seed": manifest["seed"], "client": client, "engines": len(eng),
+                     "mean_lifetime": float(np.mean([ds.train_engine_lifetimes[e] for e in eng])),
+                     "windows": int(h.sum()), "near_failure_windows_per_engine": float((y < 50).sum() / len(eng)),
+                     **{f"share_{n}": float(c / h.sum()) for n, c in zip(names, h)}})
+    return rows
+
+
+def label_mix_md(mix: list[dict]) -> list[str]:
+    shares = [k for k in mix[0] if k.startswith("share_")]
+    L = ["", f"## Client label mix at H = {mix[0]['H']}, seed {mix[0]['seed']} (share of training windows per FedLA bin)", "",
+         "| client | engines | mean lifetime | near-failure windows per engine | " + " | ".join(k[6:] for k in shares) + " |",
+         "|---|---|---|---|" + "---|" * len(shares)]
+    for r in mix:
+        L.append(f"| {r['client']} | {r['engines']} | {r['mean_lifetime']:.0f} | {r['near_failure_windows_per_engine']:.1f} | "
+                 + " | ".join(f"{r[k]:.3f}" for k in shares) + " |")
+    return L
+
+
+def secondary_md(table) -> list[str]:
+    L = ["", "## Secondary metrics (mean over seeds)", "",
+         "| method | H | RMSE | NASA score | worst-client val MAE | runs reaching 110% | median rounds to 110% |",
+         "|---|---|---|---|---|---|---|"]
+    for r in table:
+        L.append(f"| {r['algo']} | {r['H']} | {r['test_rmse_mean']:.2f} | {r['test_nasa_mean']:.0f} | "
+                 f"{r['worst_client_val_mae_mean']:.2f} | {r['n_reached_110']}/{r['n']} | "
+                 f"{fmt(r['rounds_to_110_median_reached'], 1)} |")
+    return L
+
+
+def stage_md(table) -> list[str]:
+    """S3. Overall MAE = sum over stages of (n_stage / n) * stage MAE, so the rise from H = 0 to H = 1 splits exactly
+    into one contribution per stage: (n_stage / n) * (stage MAE at H = 1 - stage MAE at H = 0)."""
+    L = ["", "## Test MAE by life stage (S3)", "",
+         "| method | H | near failure (<50) | mid (50-124) | healthy (125) |", "|---|---|---|---|---|"]
+    for r in table:
+        L.append(f"| {r['algo']} | {r['H']} | " + " | ".join(f"{r[f'mae_{st}_mean']:.2f}" for st in STAGES) + " |")
+    first = table[0]
+    n = sum(first[f"n_{st}"] for st in STAGES)
+    L += ["", f"Test engines per stage: " + ", ".join(f"{st} {first[f'n_{st}']}" for st in STAGES) + f" (total {n}).",
+          "", "Rise from H = 0 to H = 1 by stage, and each stage's share of the rise in overall test MAE:", "",
+          "| method | stage | MAE H=0 | MAE H=1 | change | contribution to overall change (cycles) |",
+          "|---|---|---|---|---|---|"]
+    for algo in ALGOS:
+        lo = next((r for r in table if r["algo"] == algo and r["H"] == 0.0), None)
+        hi = next((r for r in table if r["algo"] == algo and r["H"] == 1.0), None)
+        if lo is None or hi is None:
+            continue
+        for st in STAGES:
+            d = hi[f"mae_{st}_mean"] - lo[f"mae_{st}_mean"]
+            L.append(f"| {algo} | {st} | {lo[f'mae_{st}_mean']:.2f} | {hi[f'mae_{st}_mean']:.2f} | {d:+.2f} | "
+                     f"{first[f'n_{st}'] / n * d:+.3f} |")
+        L.append(f"| {algo} | **overall** | {lo['test_mae_mean']:.2f} | {hi['test_mae_mean']:.2f} | "
+                 f"{hi['test_mae_mean'] - lo['test_mae_mean']:+.2f} | {hi['test_mae_mean'] - lo['test_mae_mean']:+.3f} |")
+    return L
+
+
+def summary_md(table, prim, prem, per_h, base, probe, skew, mix=None) -> str:
     L = ["# Results summary (generated by `python -m rulfl.analysis`; do not edit by hand)", ""]
     L += ["## Main results: test MAE (cycles), mean ± sd over seeds", "",
           "| H | " + " | ".join(a for a in ALGOS) + " |", "|---|" + "---|" * len(ALGOS)]
@@ -237,6 +311,7 @@ def summary_md(table, prim, prem, per_h, base, probe, skew) -> str:
             r = next((r for r in table if r["algo"] == a and r["H"] == H), None)
             cells.append("n/a" if r is None else f"{r['test_mae_mean']:.2f} ± {r['test_mae_sd']:.2f}")
         L.append(f"| {H} | " + " | ".join(cells) + " |")
+    L += secondary_md(table) + stage_md(table)
     L += ["", "## Primary hypotheses (pooled H ≥ 0.5, one-sided Wilcoxon, Holm over P1 and P2)", "",
           "| | method | pairs | mean diff vs FedAvg | 95% CI | p | p (Holm) | significant |", "|---|---|---|---|---|---|---|---|"]
     for p in prim:
@@ -256,17 +331,25 @@ def summary_md(table, prim, prem, per_h, base, probe, skew) -> str:
                  f"{b['test_mae_mean']:.2f} ± {b['test_mae_sd']:.2f} |")
     if probe:
         L += ["", "## Head-refit probe (S4, diagnostic only)", "",
-              "| method | H | federated test MAE | after head refit |", "|---|---|---|---|"]
+              "Frozen GRU, fresh head trained on pooled training windows. Not a deployable method.", "",
+              "| method | H | runs | federated test MAE | after head refit | change (refit - federated) | 95% CI | "
+              "refit: near failure / mid / healthy |", "|---|---|---|---|---|---|---|---|"]
         for r in probe:
-            L.append(f"| {r['algo']} | {r['H']} | {r['test_mae_federated']:.2f} | {r['test_mae_head_refit']:.2f} |")
+            L.append(f"| {r['algo']} | {r['H']} | {r['n']} | {r['test_mae_federated']:.2f} | "
+                     f"{r['test_mae_head_refit']:.2f} | {r['change']:+.3f} | "
+                     f"[{fmt(r['change_ci_lo'], 3)}, {fmt(r['change_ci_hi'], 3)}] | "
+                     + " / ".join(f"{r[f'refit_mae_{st}']:.2f}" for st in STAGES) + " |")
     if skew:
         L += ["", "## Partition skew (mean W1, cycles)", "", "| H | skew |", "|---|---|"]
         L += [f"| {H} | {v:.2f} |" for H, v in skew.items()]
+    if mix:
+        L += label_mix_md(mix)
     L += ["", "Full tables: `main_table.csv`, `paired_per_H.csv`, `primary.csv`, `baselines.csv`, `probe.csv`."]
     return "\n".join(L) + "\n"
 
 
-def analyse(runs_root, out_dir, manifests_dir, seeds=(1, 2, 3, 4, 5), with_figures=True) -> Path:
+def analyse(runs_root, out_dir, manifests_dir, seeds=(1, 2, 3, 4, 5), with_figures=True, mix=None) -> Path:
+    """mix: optional client_label_mix rows (main() builds them from the data; tests can leave them out)."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     main = by_key(load_runs(runs_root, "main"))
@@ -284,9 +367,11 @@ def analyse(runs_root, out_dir, manifests_dir, seeds=(1, 2, 3, 4, 5), with_figur
     write_csv([prem], out / "premise.csv")
     write_csv(base, out / "baselines.csv")
     write_csv(probe, out / "probe.csv")
+    if mix:
+        write_csv(mix, out / "client_label_mix.csv")
     if with_figures:
         figures(out, table, base, probe, skew)
-    (out / "summary.md").write_text(summary_md(table, prim, prem, per_h, base, probe, skew), encoding="utf8")
+    (out / "summary.md").write_text(summary_md(table, prim, prem, per_h, base, probe, skew, mix), encoding="utf8")
     return out
 
 
@@ -296,8 +381,15 @@ def main(argv=None) -> None:
     ap.add_argument("--runs-dir", default="runs")
     ap.add_argument("--out", default="results")
     ap.add_argument("--manifests", default="manifests")
+    ap.add_argument("--config", default="configs/base.yaml")
     args = ap.parse_args(argv)
-    print(analyse(args.runs_dir, args.out, args.manifests) / "summary.md")
+    from rulfl.data.pipeline import build_dataset
+    from rulfl.partition.make_manifests import load_manifest, manifest_path
+    from rulfl.run import load_config
+    cfg = load_config(args.config, [])
+    mix = client_label_mix(build_dataset(cfg), load_manifest(manifest_path(args.manifests, 1.0, 1)),
+                           cfg["fedla"]["bin_edges"], cfg["data"]["rul_cap"])
+    print(analyse(args.runs_dir, args.out, args.manifests, mix=mix) / "summary.md")
 
 
 if __name__ == "__main__":
