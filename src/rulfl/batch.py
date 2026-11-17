@@ -78,10 +78,13 @@ COLUMNS = ["group", "name", "seed", "algo", "H", "client", "test_mae", "test_rms
 
 
 def build_index(runs_root, out) -> Path:
-    """One row per finished run (folders with DONE), rebuilt from scratch every time, never appended (E15)."""
+    """One row per finished run (folders with DONE), rebuilt from scratch every time, never appended (E15).
+    Only runs inside their own group folder count: a set-aside folder such as runs/central_cpu_discarded/ is skipped."""
     rows = []
     for done in sorted(Path(runs_root).glob("*/*/DONE")):
         final = json.loads((done.parent / "final.json").read_text(encoding="utf8"))
+        if final.get("group") != done.parent.parent.name:
+            continue
         for k, v in final.pop("test", {}).items():
             final[f"test_{k}"] = v
         rows.append({c: "" if final.get(c) is None else final[c] for c in COLUMNS})

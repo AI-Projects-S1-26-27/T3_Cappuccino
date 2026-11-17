@@ -67,6 +67,10 @@ def test_index_has_one_row_per_finished_run(tmp_path):
     fake("main", "fedla_H0.50_s3", True, seed=3, algo="fedla", H=0.5, best_val_mae=18.0)
     fake("central", "FD004_s1", True, seed=1, best_val_mae=15.0)
     fake("main", "fedavg_H0.50_s3", False, seed=3)                       # not finished: never indexed
+    d = tmp_path / "runs" / "central_cpu_discarded" / "FD004_s1"            # set aside: its group is "central"
+    d.mkdir(parents=True)
+    (d / "final.json").write_text(json.dumps({"group": "central", "name": "FD004_s1", "test": {"mae": 1.0}}))
+    (d / "DONE").write_text("done\n")
     out = build_index(tmp_path / "runs", tmp_path / "results" / "index.csv")
     with open(out, newline="") as f:
         rows = list(csv.DictReader(f))
