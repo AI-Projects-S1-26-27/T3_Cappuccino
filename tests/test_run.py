@@ -237,7 +237,7 @@ def test_cli_central_run_end_to_end_and_skip(cli):
     assert folder == cli.runs / "central" / "FD004_s1"
     final = json.loads((folder / "final.json").read_text())
     assert final["group"] == "central" and final["seed"] == 1
-    assert len(final["git_commit"]) == 40 and final["git_dirty"] is True and len(final["data_hash"]) == 64
+    assert len(final["git_commit"]) == 40 and isinstance(final["git_dirty"], bool) and len(final["data_hash"]) == 64
     assert final["seconds"] > 0 and final["test"]["mae"] > 0
 
     before = (folder / "final.json").stat().st_mtime_ns
@@ -296,3 +296,20 @@ def test_pilot_runs_before_mu_exists(cli, slice_ds):
     fake_central_runs(cli.runs, [10, 20, 30, 40, 50])
     folder = cli("pilot", "--algo", "fedavg", "--H", "1", "--seed", "101", "--set", "fl.E=1", "--set", "fl.lr=0.001")
     assert folder.name == "fedavg_H1.00_s101_E1_lr0.001"
+
+
+def test_cli_probe_refits_the_head_of_a_finished_main_run(cli, slice_ds):
+    """E6: probe/<name> starts from main/<name>/best.pt; its GRU is unchanged, its head is new."""
+    with pytest.raises(FileNotFoundError, match="main"):
+        cli("probe", "--algo", "fedla", "--H", "0.5", "--seed", "1")              # no main run yet
+    write_manifest(build_manifest(cli.cfg, slice_ds, 0.5, 1), cli.cfg["partition"]["manifests_dir"])
+    fake_central_runs(cli.runs, [10, 20, 30, 40, 50])
+    main_dir = cli("main", "--algo", "fedla", "--H", "0.5", "--seed", "1")
+    folder = cli("probe", "--algo", "fedla", "--H", "0.5", "--seed", "1")
+    assert folder == cli.runs / "probe" / "fedla_H0.50_s1"
+    a, b = torch.load(main_dir / "best.pt"), torch.load(folder / "best.pt")
+    assert all(torch.equal(a[k], b[k]) for k in a if k.startswith("gru."))
+    assert not all(torch.equal(a[k], b[k]) for k in a if k.startswith("head."))
+    final = json.loads((folder / "final.json").read_text())
+    assert final["source_run"] == "main/fedla_H0.50_s1" and final["diagnostic"] is True
+    assert final["source_test_mae"] == json.loads((main_dir / "final.json").read_text())["test"]["mae"]

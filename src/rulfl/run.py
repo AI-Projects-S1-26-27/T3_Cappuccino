@@ -8,6 +8,7 @@ Folder = runs/<group>/<name>/, where <name> holds every setting that varies insi
     python -m rulfl.run musel   --seed 101 --algo fedprox --H 1   --set fl.mu=0.01
     python -m rulfl.run main    --seed 3   --algo fedla   --H 0.5
     python -m rulfl.run local   --seed 2   --H 1 --client 4
+    python -m rulfl.run probe   --seed 3   --algo fedla   --H 0.5          (head refit of main/fedla_H0.50_s3, E6)
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from rulfl.fl.simulate import client_rows, run_federated
 from rulfl.model.gru import RULModel, predict_rul
 from rulfl.model.train import train_centralized
 from rulfl.partition.make_manifests import load_manifest, manifest_path
+from rulfl.probe import refit_head
 
 # One name pattern per group (E15). lr and mu use :g so lr / 3 stays short (0.000333333, not 0.0003333333333333333).
 NAME_FORMATS = {
@@ -189,6 +191,23 @@ def local_run(folder, cfg: dict, ds: Dataset, manifest: dict, client: int, seed:
     return out
 
 
+def probe_run(folder, cfg: dict, ds: Dataset, source, seed: int) -> dict:
+    """Head-refit probe (E6, diagnostic only): the main run's best global model, GRU frozen, fresh head trained on
+    all training windows with early stopping on validation. Writes epochs.json (head training), best.pt,
+    test_predictions.csv; records which run it came from and that run's test MAE."""
+    folder, source = Path(folder), Path(source)
+    m = cfg["model"]
+    model = RULModel(ds.X_train.shape[2], m["hidden"], m["layers"], m["dropout"]).to(cfg["train"].get("device", "cpu"))
+    model.load_state_dict(torch.load(source / "best.pt", map_location=next(model.parameters()).device))
+    refit, hist = refit_head(model, cfg, ds, seed)
+    (folder / "epochs.json").write_text(json.dumps(_clean(hist)), encoding="utf8")
+    out = save_model_outputs(folder, refit, ds, cfg)
+    src = json.loads((source / "final.json").read_text(encoding="utf8"))
+    out.update(best_epoch=hist["best_epoch"], best_val_mae=hist["val_mae"][hist["best_epoch"]],
+               source_run=f"main/{source.name}", source_test_mae=src["test"]["mae"], diagnostic=True)
+    return _clean(out)
+
+
 # ---------- command line ----------
 
 FEDERATED = ("pilot", "musel", "main")
@@ -222,7 +241,7 @@ def allowed_seeds(cfg: dict, group: str) -> list[int]:
     """Seeds each group may use: choices are made on seeds 101-103 only, results reported on 1-5 (F5, F7, M6)."""
     s, t = cfg["seeds"], cfg["tuning"]
     return {"tune": t["seeds_first_pass"] + t["seeds_confirm"], "central": s["main"], "pilot": s["pilot"],
-            "musel": s["selection"], "main": s["main"], "local": s["main"]}[group]
+            "musel": s["selection"], "main": s["main"], "local": s["main"], "probe": s["main"]}[group]
 
 
 def name_params(group: str, args, cfg: dict) -> dict:
@@ -254,7 +273,9 @@ def check_args(group: str, args, cfg: dict) -> None:
         missing = [k for k in needed if k not in cfg["fl"]]
         if missing:
             raise ValueError(f"config has no fl.{missing[0]}: the pilot / mu selection must freeze it (F5, F7)")
-    if group in FEDERATED + ("local",) and args.H is None:
+    if group == "probe" and args.algo not in ("fedavg", "fedprox", "fedla"):
+        raise ValueError("a probe names the main run it refits: --algo fedavg, fedprox or fedla")
+    if group in FEDERATED + ("local", "probe") and args.H is None:
         raise ValueError(f"group {group!r} needs --H")
     if (group == "local") != (args.client is not None):
         raise ValueError("--client is required for local runs and only for local runs")
@@ -282,7 +303,7 @@ def data_hash(cfg: dict) -> str:
 def main(argv=None) -> Path:
     ap = argparse.ArgumentParser(prog="python -m rulfl.run", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("group", choices=["tune", "central", "pilot", "musel", "main", "local"])
+    ap.add_argument("group", choices=["tune", "central", "pilot", "musel", "main", "local", "probe"])
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--algo")
     ap.add_argument("--H", type=float)
@@ -305,6 +326,9 @@ def main(argv=None) -> Path:
         manifest = load_manifest(manifest_path(cfg["partition"]["manifests_dir"], args.H, args.seed))
     if group in FEDERATED:
         threshold = central_threshold(args.runs_dir, cfg)
+    source = Path(args.runs_dir) / "main" / name                          # probe: the main run it refits (E6)
+    if group == "probe" and not (source / "DONE").exists():
+        raise FileNotFoundError(f"the head-refit probe needs the finished main run {source}")
 
     def work(folder: Path) -> None:
         torch.set_num_threads(cfg["train"]["threads"])                    # M5
@@ -313,6 +337,8 @@ def main(argv=None) -> Path:
         ds = build_dataset(cfg)
         if group in FEDERATED:
             out = federated_run(folder, cfg, ds, manifest, args.algo, args.seed, threshold)
+        elif group == "probe":
+            out = probe_run(folder, cfg, ds, source, args.seed)
         elif group == "local":
             out = local_run(folder, cfg, ds, manifest, args.client, args.seed)
         else:

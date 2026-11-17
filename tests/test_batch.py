@@ -36,6 +36,7 @@ def test_other_plans_have_the_planned_sizes(cfg):
     assert len(plan("pilot", cfg)) == 16                                 # F7: E x lr x H x seeds 101-102
     assert len(plan("musel", cfg)) == 12                                 # F5: 4 mu x seeds 101-103
     assert len(plan("local", cfg)) == 50                                 # E5: H 0 and 1 x 5 seeds x 5 clients
+    assert plan("probe", cfg) == [j.replace("main ", "probe ", 1) for j in plan("main", cfg)]   # E6: one per main run
     assert all("--seed 1" not in j.replace("--seed 10", "") for j in plan("pilot", cfg) + plan("musel", cfg))
 
 

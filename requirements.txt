@@ -8,3 +8,4 @@ PyYAML==6.0.3           # configs/*.yaml
 pytest==9.2.0           # tests
 torch==2.15.0           # GRU model and training (CPU build, see requirements.lock)
 flwr[simulation]==1.42.0  # Flower ClientApp/ServerApp + simulation engine (Gate 2)
+matplotlib==3.11.2      # report figures (rulfl.analysis); approved 2026-11-17 (P5)
