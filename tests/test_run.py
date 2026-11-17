@@ -313,3 +313,18 @@ def test_cli_probe_refits_the_head_of_a_finished_main_run(cli, slice_ds):
     final = json.loads((folder / "final.json").read_text())
     assert final["source_run"] == "main/fedla_H0.50_s1" and final["diagnostic"] is True
     assert final["source_test_mae"] == json.loads((main_dir / "final.json").read_text())["test"]["mae"]
+
+
+def test_cli_probe_control_refits_an_untrained_gru(cli):
+    """E20: probectl/untrained_s<seed> = the probe's head refit on a GRU straight from initialisation."""
+    with pytest.raises(ValueError, match="untrained"):
+        cli("probectl", "--algo", "fedavg", "--seed", "1")
+    folder = cli("probectl", "--seed", "1")
+    assert folder == cli.runs / "probectl" / "untrained_s1"
+    saved = torch.load(folder / "best.pt")
+    torch.manual_seed(1)
+    fresh = RULModel(saved["gru.weight_ih_l0"].shape[1], cli.cfg["model"]["hidden"], cli.cfg["model"]["layers"],
+                     cli.cfg["model"]["dropout"])
+    assert all(torch.equal(fresh.state_dict()[k], saved[k]) for k in saved if k.startswith("gru."))
+    final = json.loads((folder / "final.json").read_text())
+    assert final["source_run"] is None and final["diagnostic"] is True and final["algo"] is None

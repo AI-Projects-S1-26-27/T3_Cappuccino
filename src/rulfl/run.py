@@ -9,6 +9,7 @@ Folder = runs/<group>/<name>/, where <name> holds every setting that varies insi
     python -m rulfl.run main    --seed 3   --algo fedla   --H 0.5
     python -m rulfl.run local   --seed 2   --H 1 --client 4
     python -m rulfl.run probe   --seed 3   --algo fedla   --H 0.5          (head refit of main/fedla_H0.50_s3, E6)
+    python -m rulfl.run probectl --seed 3                                  (same refit on an untrained GRU, E20)
 """
 from __future__ import annotations
 
@@ -46,6 +47,7 @@ NAME_FORMATS = {
     "main": "{algo}_H{H:.2f}_s{seed}",
     "local": "H{H:.2f}_s{seed}_c{client}",
     "probe": "{algo}_H{H:.2f}_s{seed}",
+    "probectl": "untrained_s{seed}",
 }
 
 
@@ -194,17 +196,23 @@ def local_run(folder, cfg: dict, ds: Dataset, manifest: dict, client: int, seed:
 def probe_run(folder, cfg: dict, ds: Dataset, source, seed: int) -> dict:
     """Head-refit probe (E6, diagnostic only): the main run's best global model, GRU frozen, fresh head trained on
     all training windows with early stopping on validation. Writes epochs.json (head training), best.pt,
-    test_predictions.csv; records which run it came from and that run's test MAE."""
-    folder, source = Path(folder), Path(source)
+    test_predictions.csv; records which run it came from and that run's test MAE.
+    source=None is the control (E20): the same refit on an untrained GRU initialised from `seed`, which shows how far
+    a head trained on pooled data gets without learned features."""
+    folder = Path(folder)
     m = cfg["model"]
+    torch.manual_seed(seed)
     model = RULModel(ds.X_train.shape[2], m["hidden"], m["layers"], m["dropout"]).to(cfg["train"].get("device", "cpu"))
-    model.load_state_dict(torch.load(source / "best.pt", map_location=next(model.parameters()).device))
+    if source is not None:
+        source = Path(source)
+        model.load_state_dict(torch.load(source / "best.pt", map_location=next(model.parameters()).device))
     refit, hist = refit_head(model, cfg, ds, seed)
     (folder / "epochs.json").write_text(json.dumps(_clean(hist)), encoding="utf8")
     out = save_model_outputs(folder, refit, ds, cfg)
-    src = json.loads((source / "final.json").read_text(encoding="utf8"))
+    src = None if source is None else json.loads((source / "final.json").read_text(encoding="utf8"))
     out.update(best_epoch=hist["best_epoch"], best_val_mae=hist["val_mae"][hist["best_epoch"]],
-               source_run=f"main/{source.name}", source_test_mae=src["test"]["mae"], diagnostic=True)
+               source_run=None if source is None else f"main/{source.name}",
+               source_test_mae=None if src is None else src["test"]["mae"], diagnostic=True)
     return _clean(out)
 
 
@@ -241,7 +249,8 @@ def allowed_seeds(cfg: dict, group: str) -> list[int]:
     """Seeds each group may use: choices are made on seeds 101-103 only, results reported on 1-5 (F5, F7, M6)."""
     s, t = cfg["seeds"], cfg["tuning"]
     return {"tune": t["seeds_first_pass"] + t["seeds_confirm"], "central": s["main"], "pilot": s["pilot"],
-            "musel": s["selection"], "main": s["main"], "local": s["main"], "probe": s["main"]}[group]
+            "musel": s["selection"], "main": s["main"], "local": s["main"], "probe": s["main"],
+            "probectl": s["main"]}[group]
 
 
 def name_params(group: str, args, cfg: dict) -> dict:
@@ -275,6 +284,8 @@ def check_args(group: str, args, cfg: dict) -> None:
             raise ValueError(f"config has no fl.{missing[0]}: the pilot / mu selection must freeze it (F5, F7)")
     if group == "probe" and args.algo not in ("fedavg", "fedprox", "fedla"):
         raise ValueError("a probe names the main run it refits: --algo fedavg, fedprox or fedla")
+    if group == "probectl" and (args.algo is not None or args.H is not None):
+        raise ValueError("the probe control refits an untrained GRU: no --algo, no --H")
     if group in FEDERATED + ("local", "probe") and args.H is None:
         raise ValueError(f"group {group!r} needs --H")
     if (group == "local") != (args.client is not None):
@@ -303,7 +314,7 @@ def data_hash(cfg: dict) -> str:
 def main(argv=None) -> Path:
     ap = argparse.ArgumentParser(prog="python -m rulfl.run", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("group", choices=["tune", "central", "pilot", "musel", "main", "local", "probe"])
+    ap.add_argument("group", choices=["tune", "central", "pilot", "musel", "main", "local", "probe", "probectl"])
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--algo")
     ap.add_argument("--H", type=float)
@@ -337,8 +348,8 @@ def main(argv=None) -> Path:
         ds = build_dataset(cfg)
         if group in FEDERATED:
             out = federated_run(folder, cfg, ds, manifest, args.algo, args.seed, threshold)
-        elif group == "probe":
-            out = probe_run(folder, cfg, ds, source, args.seed)
+        elif group in ("probe", "probectl"):
+            out = probe_run(folder, cfg, ds, source if group == "probe" else None, args.seed)
         elif group == "local":
             out = local_run(folder, cfg, ds, manifest, args.client, args.seed)
         else:

@@ -42,6 +42,8 @@ def plan(group: str, cfg: dict) -> list[str]:
                 for seed in s["main"] for H in cfg["partition"]["H_grid"] for algo in ("fedavg", "fedprox", "fedla")]
     if group == "probe":                                      # E6: one head refit per main-grid run
         return [line.replace("main ", "probe ", 1) for line in plan("main", cfg)]
+    if group == "probectl":                                   # E20: the probe's control, untrained GRU
+        return [f"probectl --seed {seed}" for seed in s["main"]]
     if group == "local":                                      # E5: each client alone, at the two extremes
         return [f"local --seed {seed} --H {H} --client {k}"
                 for seed in s["main"] for H in (0.0, 1.0) for k in range(f["K"])]

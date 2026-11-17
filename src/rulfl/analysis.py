@@ -130,6 +130,11 @@ def baselines(runs_root) -> list[dict]:
         m = np.array([r["test"]["mae"] for r in cen])
         rows.append({"baseline": "centralized", "H": None, "n": len(m), "test_mae_mean": m.mean(),
                      "test_mae_sd": m.std(ddof=1) if len(m) > 1 else 0.0})
+    ctl = load_runs(runs_root, "probectl")
+    if ctl:                                                   # E20: head refit on an untrained GRU
+        m = np.array([r["test"]["mae"] for r in ctl])
+        rows.append({"baseline": "untrained_gru_head_refit", "H": None, "n": len(m), "test_mae_mean": m.mean(),
+                     "test_mae_sd": m.std(ddof=1) if len(m) > 1 else 0.0})
     loc = load_runs(runs_root, "local")
     for H in sorted({float(r["H"]) for r in loc}):
         m = np.array([r["test"]["mae"] for r in loc if float(r["H"]) == H])
