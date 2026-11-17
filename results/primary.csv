@@ -1,0 +1,3 @@
+hypothesis,algo,n_pairs,mean_diff,ci_lo,ci_hi,p_less,p_holm,significant_at_0.05
+P1,fedla,15,-0.111567,-0.201391,-0.0246269,0.0276794,0.0553589,False
+P2,fedprox,15,0.47102,0.271503,0.658934,0.999573,0.999573,False

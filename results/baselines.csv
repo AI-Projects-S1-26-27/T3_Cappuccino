@@ -1,0 +1,5 @@
+baseline,H,n,test_mae_mean,test_mae_sd
+centralized,,5,10.0136,0.183043
+untrained_gru_head_refit,,5,13.9378,0.222578
+local_only,0,25,12.691,1.26563
+local_only,1,25,17.8667,3.97653
